@@ -1,0 +1,3 @@
+- **Status**: blocked
+- **Where I am**: half of the reorganization is done; the full link check has held the slot for 20 minutes and has not finished
+- **Next**: wait for the check result

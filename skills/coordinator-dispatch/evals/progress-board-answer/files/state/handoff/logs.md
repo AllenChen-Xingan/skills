@@ -1,0 +1,3 @@
+- **Status**: in progress
+- **Where I am**: benchmarked two of the three libraries
+- **Next**: benchmark the third

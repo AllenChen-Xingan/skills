@@ -1,39 +1,39 @@
-# Template: worker handoff page
+# Worker handoff page template
 
-The handoff page is the worker's "black box". When the session breaks, when there's a handover, when the human asks for status, this page is what everyone relies on. **One page per worker**; file name = window name.
+The handoff page is the worker's "black box": when the session dies, a worker is replaced, or the human asks about progress, this is what everyone relies on. **One page per worker**; file name = window name.
 
-How to write it:
+Writing tips:
 
-- The top two items (Status, Progress) must be readable at a glance. The human may be listening with a screen reader: short sentences, status word first
-- The log is append-only; `HH:MM` is enough for times
-- Every pending decision needs options and a recommendation, or the coordinator can't ask them all at once
+- The top two fields (Status, Where I am) must be readable at a glance -- the human may be listening with a screen reader, so use short sentences with the status word first
+- The log is append-only, never rewritten; `HH:MM` is enough for times
+- Every item under "Needs a human decision" needs options and a recommendation, otherwise the coordinator can't ask them all in one go
 
-`scripts/new-batch.py` doesn't generate handoff pages (workers create their own). Copy the template below when needed.
+`scripts/new-batch.py` does not generate handoff pages (workers create their own); copy the template below when needed.
 
 <!-- template:start -->
 # Handoff page · {{WORKER}} (batch {{BATCH_NAME}})
 
 - **Status**: dispatched / checked in / in progress / blocked / wrapped up
-- **Current task**: <one-sentence task>
+- **Working on**: <one-line task>
 - **Brief**: `{{BATCH}}/{{WORKER}}.md`
-- **Progress** ({{DATE}}): <latest one or two sentences>
-- **Next step**: <one sentence>
+- **Where I am** ({{DATE}}): <latest one or two sentences>
+- **Next**: <one line>
 
 ## Files changed
 | File | What changed |
 |---|---|
 
 ## Findings
-- <surprises, pitfalls, anything that affects other lines>
+- <surprises, pitfalls, things that affect other workstreams>
 
-## Pending decisions
+## Needs a human decision
 1. **<question>**
-   - A. <option>: cost <…> ← recommended
-   - B. <option>: cost <…>
+   - A. <option> -- cost: <…> <- recommended
+   - B. <option> -- cost: <…>
 
 ## Hand-offs (out of scope, left for the coordinator)
 - <…>
 
 ## Log
-- HH:MM <what was done> → <result>
+- HH:MM <what I did> -> <result>
 <!-- template:end -->

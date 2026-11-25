@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: small-task-no-tmux
+expected_outcome: |
+  Judges this to be a small single-workstream job of ten-odd minutes and does not start a tmux worker; does it directly or with an in-session subagent.

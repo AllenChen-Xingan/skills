@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: dispatch-two-workers-dry-run
+expected_outcome: |
+  Generates the batch skeleton (common.md, two briefs, two first-message files); the briefs contain the user's intent in their own words, what to read first, your task, which files you may write, and what to deliver; shows the window-start actions with spawn-worker.sh --dry-run; the first message comes from a file rather than being spliced into the command line; no real tmux window is started; the board has two worker rows, or the reply says where the board is.
