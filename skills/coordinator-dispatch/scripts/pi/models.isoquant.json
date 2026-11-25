@@ -1,0 +1,33 @@
+{
+  "$schema": "https://pi.dev/schemas/models.schema.json",
+  "providers": {
+    "isoquant": {
+      "name": "Isoquant",
+      "baseUrl": "https://api.isoquant.ai/v1",
+      "api": "openai-completions",
+      "apiKey": "!sed -n 's/^ISOQUANT_API_KEY=//p' \"$HOME/.config/isoquant/.env\"",
+      "models": [
+        {
+          "id": "deepseek-v4.1-flash-1017-fast",
+          "name": "DeepSeek V4.1 Flash (Isoquant)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1048576,
+          "maxTokens": 65536,
+          "cost": {
+            "input": 0.035,
+            "output": 0.37,
+            "cacheRead": 0.005,
+            "cacheWrite": 0
+          }
+        }
+      ],
+      "headers": {
+        "Isoquant-ZDR": "required"
+      }
+    }
+  }
+}

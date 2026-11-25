@@ -6,15 +6,15 @@ usage() {
   cat <<'USAGE'
 Usage: close-worker.sh <session> <window> [options]
 
-Print the tail of window <session>:<window>, then close that window after confirmation
-(only this one window; other windows in the session are left alone).
-Refuses to close the window it is running in (so the coordinator can't close itself).
+Print the pane tail of window <session>:<window>, then close that window after confirmation
+(only that one window; other windows in the session are not touched).
+Refuses to close the window it is running in (so the coordinator cannot close itself).
 
 Options:
-  --yes      Don't ask, just close (only after a human has already read the pane tail)
-  --tail N   Number of pane-tail lines to print (default 15)
-  -h, --help Show this help
-Exit codes: 0 closed · 1 bad arguments / not found · 5 cancelled by user · 6 refused to close current window
+  --yes      do not ask, close right away (only use after a human has read the pane tail)
+  --tail N   number of pane-tail lines to print (default 15)
+  -h, --help show this help
+Exit codes: 0 closed · 1 bad arguments / not found · 5 cancelled by user · 6 refused to close the current window
 USAGE
 }
 
@@ -32,8 +32,8 @@ done
 SESSION="${POS[0]}"; WINDOW="${POS[1]}"
 T="=$SESSION:$WINDOW"
 
-tmux has-session -t "=$SESSION" 2>/dev/null || { echo "No such session: $SESSION" >&2; exit 1; }
-tmux list-windows -t "=$SESSION" -F '#{window_name}' | grep -Fxq "$WINDOW" || { echo "No such window: $SESSION:$WINDOW" >&2; exit 1; }
+tmux has-session -t "=$SESSION" 2>/dev/null || { echo "Session does not exist: $SESSION" >&2; exit 1; }
+tmux list-windows -t "=$SESSION" -F '#{window_name}' | grep -Fxq "$WINDOW" || { echo "Window does not exist: $SESSION:$WINDOW" >&2; exit 1; }
 
 if [[ -n "${TMUX_PANE:-}" ]]; then
   here="$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}:#{window_name}')"

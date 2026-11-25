@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+# pi-worker — run pi (RPC mode) as a worker of a Claude Code coordinator. See references/pi-worker.md.
+#
+#   pi-worker start  <name> (--repo REPO [--base B] [--branch BR] | --cwd DIR) (--task TEXT | --task-file FILE)
+#                    [--model M] [--thinking L] [--budget USD] [--heavy-re REGEX] [--readonly] [--session PATH]
+#                    --repo: creates worktree <repo>.worktrees/<name> on new branch w/<name> from the base
+#                    (default origin/<default branch>, else the repo's current branch). See references/git-workflow.md
+#   pi-worker watch  <name> [--verbose] [--from-start]   # run under Monitor: one line per key event
+#   pi-worker grant  <name> <quota-id>                   # give the heavy-work slot ("granted")
+#   pi-worker deny   <name> <quota-id> ["why"]           # refuse it (the why goes in as a steer)
+#   pi-worker answer <name> <ask-id> "answer"            # reply to ask_claude
+#   pi-worker steer  <name> "msg"                        # inject after current tool calls, before next LLM call
+#   pi-worker follow <name> "msg"                        # queue for when pi finishes / new round if idle
+#   pi-worker budget <name> <usd>                        # change the cost cap (0 = none); unblocks after BUDGET
+#   pi-worker review <name> [--model M] [--budget USD]   # start <name>-review: read-only cheap review of the diff
+#   pi-worker clean  <name> [--delete-remote] [--force]  # after merge: stop, remove worktree + branch
+#   pi-worker abort  <name> | status <name> | stop <name> | list
+#
+# State: $PI_WORKER_HOME/<name>/ (default ~/.local/state/pi-worker)
+#   inbox.jsonl (every command sent, tailed into pi's stdin) · events.jsonl (pi's RPC stdout)
+#   stderr.log · meta · cursor (last line delivered by watch)
+set -euo pipefail
+
+HOME_DIR="${PI_WORKER_HOME:-$HOME/.local/state/pi-worker}"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXT="${PI_WORKER_EXTENSION:-$SELF_DIR/pi/claude-bridge.ts}"
+DEFAULT_MODEL="${PI_WORKER_MODEL:-isoquant/deepseek-v4.1-flash-1017-fast}"
+REVIEW_MODEL="${PI_WORKER_REVIEW_MODEL:-$DEFAULT_MODEL}"
+
+die() { echo "pi-worker: $*" >&2; exit 1; }
+need_name() { [[ -n "${1:-}" ]] || die "missing worker name"; [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]] || die "bad name: $1"; }
+sdir() { echo "$HOME_DIR/$1"; }
+meta() { sed -n "s/^$2=//p" "$(sdir "$1")/meta" 2>/dev/null; }
+alive() { local p; p="$(cat "$(sdir "$1")/pi.pid" 2>/dev/null)" && kill -0 "$p" 2>/dev/null; }
+send() { # send <name> <json>
+	local S; S="$(sdir "$1")"; [[ -d "$S" ]] || die "no worker $1"
+	alive "$1" || die "worker $1 is not running"
+	printf '%s\n' "$2" >>"$S/inbox.jsonl"
+}
+newid() { echo "c$(date +%s)$RANDOM"; }
+prompt_json() { jq -nc --arg id "$(newid)" --arg m "$1" '{id:$id,type:"prompt",message:$m,streamingBehavior:"followUp"}'; }
+
+PROTECTED_RE="${PI_WORKER_PROTECTED:-main|master|develop|trunk|release/.*|production}"
+WT="$SELF_DIR/git/worktree.sh"   # the one implementation of worktree/branch handling
+is_protected() { [[ "$1" =~ ^($PROTECTED_RE)$ ]]; }
+
+cmd_start() {
+	local name="${1:-}"; need_name "$name"; shift
+	local cwd="" repo="" base="" branch="" task="" model="$DEFAULT_MODEL" thinking="" session="" budget="${PI_WORKER_BUDGET_USD:-0}" heavy="${PI_WORKER_HEAVY_RE:-}" readonly=false
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+			--cwd) cwd="$2"; shift 2 ;;
+			--repo) repo="$2"; shift 2 ;;
+			--base) base="$2"; shift 2 ;;
+			--branch) branch="$2"; shift 2 ;;
+			--task) task="$2"; shift 2 ;;
+			--task-file) task="$(cat "$2")"; shift 2 ;;
+			--model) model="$2"; shift 2 ;;
+			--thinking) thinking="$2"; shift 2 ;;
+			--session) session="$2"; shift 2 ;;
+			--budget) budget="$2"; shift 2 ;;
+			--heavy-re) heavy="$2"; shift 2 ;;
+			--readonly) readonly=true; shift ;;
+			*) die "unknown option $1" ;;
+		esac
+	done
+	[[ -n "$task" ]] || die "--task or --task-file required"
+	alive "$name" && die "worker $name already running"
+	if [[ -n "$repo" ]]; then # own worktree + own branch
+		local out; out="$("$WT" new "$repo" "$name" ${base:+--base "$base"} ${branch:+--branch "$branch"})" || exit 1
+		cwd="$(sed -n 's/^cwd=//p' <<<"$out")"; branch="$(sed -n 's/^branch=//p' <<<"$out")"; base="$(sed -n 's/^base=//p' <<<"$out")"
+		repo="$(git -C "$repo" rev-parse --show-toplevel)"
+	fi
+	[[ -d "$cwd" ]] || die "--repo or --cwd (an existing directory) required"
+	if [[ -z "$repo" ]] && git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1 && ! $readonly; then
+		branch="$(git -C "$cwd" rev-parse --abbrev-ref HEAD)"
+		is_protected "$branch" && die "$cwd is on protected branch $branch; use --repo to give the worker its own branch"
+		[[ -n "$base" ]] || base="$("$WT" base "$cwd")"
+	fi
+	[[ "$budget" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "--budget must be a number of USD"
+	local S; S="$(sdir "$name")"
+	mkdir -p "$S/sessions"
+	: >"$S/inbox.jsonl"; : >"$S/events.jsonl"; : >"$S/stderr.log"; rm -f "$S/cursor" "$S/exit"
+	rm -f "$S/stdin.fifo"; mkfifo "$S/stdin.fifo"
+
+	local args=(--mode rpc --model "$model" --name "$name" --session-dir "$S/sessions" -e "$EXT")
+	[[ -n "$thinking" ]] && args+=(--thinking "$thinking")
+	[[ -n "$session" ]] && args+=(--session "$session")
+	$readonly && args+=(--tools "read,grep,find,ls,report_to_claude,ask_claude")
+	cwd="$(cd "$cwd" && pwd)"
+	printf '%s\n' "cwd=$cwd" "repo=$repo" "branch=$branch" "base=$base" "model=$model" "budget=$budget" "readonly=$readonly" "started=$(date -u +%FT%TZ)" >"$S/meta"
+
+	# Runner: inbox.jsonl --tail--> fifo --> pi stdin; pi stdout --> events.jsonl.
+	PI_WORKER_BUDGET_USD="$budget" PI_WORKER_HEAVY_RE="$heavy" PI_WORKER_BRANCH="$branch" PI_WORKER_BASE="$base" \
+	PI_WORKER_PROTECTED="$PROTECTED_RE" nohup bash -c '
+		S="$1"; shift; cd "$1"; shift
+		tail -n +1 -F "$S/inbox.jsonl" >"$S/stdin.fifo" 2>/dev/null & echo $! >"$S/tail.pid"
+		pi "$@" <"$S/stdin.fifo" >>"$S/events.jsonl" 2>>"$S/stderr.log" & P=$!; echo $P >"$S/pi.pid"
+		wait $P; code=$?
+		kill "$(cat "$S/tail.pid")" 2>/dev/null
+		echo "$code" >"$S/exit"
+		printf "{\"type\":\"pi_worker_exit\",\"code\":%s}\n" "$code" >>"$S/events.jsonl"
+	' _ "$S" "$cwd" "${args[@]}" >/dev/null 2>&1 &
+	echo $! >"$S/runner.pid"
+
+	for _ in $(seq 50); do [[ -s "$S/pi.pid" ]] && break; sleep 0.1; done
+	alive "$name" || die "pi failed to start; see $S/stderr.log"
+	send "$name" "$(jq -nc --arg id "$(newid)" --arg m "$task" '{id:$id,type:"prompt",message:$m}')"
+	echo "started $name (pid $(cat "$S/pi.pid")) model=$model budget=\$$budget readonly=$readonly cwd=$cwd${branch:+ branch=$branch base=$base} state=$S"
+}
+
+# jq filter: raw RPC records -> one line per key event the coordinator acts on.
+FILTER='
+def clip(n): tostring | gsub("\n";" ⏎ ") | if length > n then .[0:n] + "…" else . end;
+def ts: (now | strftime("%H:%M:%S"));
+def ui: .type=="extension_ui_request";
+(if .type=="tool_execution_start" and .toolName=="report_to_claude" then "REPORT \(.args.status): \(.args.message|clip(4000))"
+elif ui and .method=="select" and ((.title // "")|startswith("[quota] ")) then
+	"QUOTA id=\(.id): \(.title|ltrimstr("[quota] ")|clip(400))  → pi-worker grant|deny <name> \(.id)"
+elif ui and (.method|IN("input","select","confirm","editor")) then
+	"ASK id=\(.id): \((.title // "")|ltrimstr("[ask_claude] ")|clip(1500))\(if .options then "  options=\(.options|join(" | "))" else "" end)"
+elif ui and .method=="notify" and ((.message // "")|startswith("[quota-return] ")) then "QUOTA_RETURN \(.message|ltrimstr("[quota-return] "))"
+elif ui and .method=="notify" and ((.message // "")|startswith("[budget] ")) then "BUDGET \(.message|ltrimstr("[budget] "))"
+elif ui and .method=="notify" and ((.message // "")|startswith("[spend] ")) then "SPEND \(.message|ltrimstr("[spend] "))"
+elif ui and .method=="notify" and ((.message // "")|startswith("[git] ")) then "GIT \(.message|ltrimstr("[git] ")|clip(400))"
+elif ui and .method=="notify" and .notifyType=="error" then "NOTE_ERROR \(.message|clip(300))"
+elif .type=="tool_execution_end" and .isError and (.toolName|IN("ask_claude","report_to_claude")|not) then
+	"TOOL_ERROR \(.toolName): \((.result.content[0].text // .result)|clip(300))"
+elif .type=="message_end" and .message.role=="assistant" and .message.stopReason=="error" then "LLM_ERROR \(.message.errorMessage|clip(300))"
+elif .type=="auto_retry_start" then "RETRY \(.attempt)/\(.maxAttempts) in \(.delayMs)ms: \(.errorMessage|clip(200))"
+elif .type=="auto_retry_end" and (.success|not) then "RETRY_FAILED \(.finalError|clip(200))"
+elif .type=="response" and (.success|not) then "CMD_FAIL \(.command): \(.error|clip(300))"
+elif .type=="extension_error" then "EXT_ERROR \(.error|clip(300))"
+elif .type=="compaction_start" then "COMPACTING \(.reason)"
+elif .type=="agent_settled" then "SETTLED\(if .aborted then " (aborted)" else "" end) — pi is idle; review its work"
+elif .type=="pi_worker_exit" then "EXITED code=\(.code)"
+elif $verbose and .type=="tool_execution_start" then "TOOL \(.toolName) \(.args|clip(160))"
+elif $verbose and .type=="message_end" and .message.role=="assistant" then
+	"SAID \([.message.content[]? | select(.type=="text") | .text] | join(" ") | clip(400))"
+else empty end) as $line | "[\(ts)] \($line)"
+'
+
+cmd_watch() {
+	local name="${1:-}"; need_name "$name"; shift
+	local verbose=false from_start=false
+	while [[ $# -gt 0 ]]; do
+		case "$1" in --verbose) verbose=true ;; --from-start) from_start=true ;; *) die "unknown option $1" ;; esac; shift
+	done
+	local S; S="$(sdir "$name")"; [[ -f "$S/events.jsonl" ]] || die "no worker $name"
+	# Resume after the last line a previous watch delivered, so re-arming Monitor loses nothing.
+	local start=1
+	if ! $from_start && [[ -s "$S/cursor" ]]; then start=$(( $(cat "$S/cursor") + 1 )); fi
+	if [[ -f "$S/exit" ]] && [[ $start -gt $(wc -l <"$S/events.jsonl") ]]; then echo "EXITED code=$(cat "$S/exit") (nothing new)"; return 0; fi
+
+	# tail runs on its own (via a fifo) so it can be killed as soon as awk sees pi exit;
+	# `wait` on a whole pipeline would otherwise block on tail forever.
+	local tmp; tmp="$(mktemp -d)"; mkfifo "$tmp/f"
+	trap 'pkill -P $$ 2>/dev/null; rm -rf "$tmp"; exit 0' TERM INT HUP
+	tail -n "+$start" -F "$S/events.jsonl" >"$tmp/f" 2>/dev/null &
+	local tailpid=$!
+	awk -v c="$S/cursor" -v n="$((start - 1))" '{ print; fflush(); n++; print n > c; close(c) } /"type":"pi_worker_exit"/ { exit }' <"$tmp/f" \
+		| jq --unbuffered -rR --argjson verbose "$verbose" "fromjson? // empty | $FILTER" &
+	wait $! || true
+	kill "$tailpid" 2>/dev/null || true
+	rm -rf "$tmp"
+}
+
+spend_of() { # total model cost so far, from the event log
+	jq -R 'fromjson? // empty | select(.type=="message_end" and .message.role=="assistant") | (.message.usage.cost.total // 0)' \
+		"$(sdir "$1")/events.jsonl" | awk '{ s += $1 } END { printf "%.4f", s }'
+}
+
+cmd_status() {
+	local name="${1:-}"; need_name "$name"; local S; S="$(sdir "$name")"; [[ -d "$S" ]] || die "no worker $name"
+	cat "$S/meta"
+	echo "spent=\$$(spend_of "$name")"
+	if alive "$name"; then echo "state=running pid=$(cat "$S/pi.pid")"; else echo "state=exited code=$(cat "$S/exit" 2>/dev/null || echo '?')"; fi
+	echo "--- last key events"
+	tail -n 4000 "$S/events.jsonl" | jq -rR --argjson verbose false "fromjson? // empty | $FILTER" | tail -n 8
+	local cwd; cwd="$(meta "$name" cwd)"
+	if git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+		local br base; br="$(git -C "$cwd" rev-parse --abbrev-ref HEAD)"; base="$(meta "$name" base)"
+		echo "--- git ($cwd)"
+		echo "branch=$br${base:+ base=$base}$([[ -n "$(meta "$name" branch)" && "$br" != "$(meta "$name" branch)" ]] && echo "  !! expected $(meta "$name" branch)")"
+		if [[ -n "$base" ]] && git -C "$cwd" rev-parse -q --verify "$base" >/dev/null; then
+			echo "vs base: $(git -C "$cwd" rev-list --count "$base..HEAD") ahead, $(git -C "$cwd" rev-list --count "HEAD..$base") behind"
+			git -C "$cwd" log --oneline "$base..HEAD" | head -10
+		fi
+		if git -C "$cwd" rev-parse -q --verify '@{u}' >/dev/null 2>&1; then
+			echo "unpushed: $(git -C "$cwd" rev-list --count '@{u}..HEAD')"
+		elif git -C "$cwd" remote get-url origin >/dev/null 2>&1; then echo "unpushed: branch not pushed yet"; fi
+		echo "uncommitted:"; git -C "$cwd" status --short | head -20
+	fi
+	if [[ -s "$S/stderr.log" ]]; then echo "--- stderr (tail)"; tail -n 5 "$S/stderr.log"; fi
+}
+
+cmd_review() {
+	local src="${1:-}"; need_name "$src"; shift
+	local model="$REVIEW_MODEL" budget="0.20"
+	while [[ $# -gt 0 ]]; do
+		case "$1" in --model) model="$2"; shift 2 ;; --budget) budget="$2"; shift 2 ;; *) die "unknown option $1" ;; esac
+	done
+	local cwd; cwd="$(meta "$src" cwd)"; [[ -n "$cwd" ]] || die "no worker $src"
+	git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "$cwd is not a git work tree; nothing to diff"
+	local R; R="$(sdir "$src-review")"; mkdir -p "$R"
+	local base mb; base="$(meta "$src" base)"
+	mb="$( [[ -n "$base" ]] && git -C "$cwd" merge-base "$base" HEAD 2>/dev/null || git -C "$cwd" rev-parse HEAD)"
+	{ echo "# commits since base ${base:-HEAD}:"; git -C "$cwd" log --oneline "$mb..HEAD"; echo
+	  git -C "$cwd" diff "$mb"; echo; echo "# untracked files (read them directly):"; git -C "$cwd" ls-files --others --exclude-standard; } >"$R/diff.patch"
+	local task
+	task="$(cat <<EOF
+You are a code reviewer (first, cheap review pass). Do not change any file.
+The change under review is in $R/diff.patch (all commits and uncommitted changes since the base ${base:-HEAD} in $cwd, plus a list of new files).
+The original task given to the author is below between the markers.
+Read the diff and the surrounding code you need. Look for: bugs, missed requirements, broken edge cases,
+tests that do not actually test the change, red-line violations (secrets, unrelated edits).
+Rank findings P0 (wrong/broken) · P1 (likely bug or missing requirement) · P2 (should fix) · P3 (nit),
+each with file:line and one sentence of why. When finished, call report_to_claude once with status=done
+and the full findings list (or "no findings" plus what you checked).
+--- original task ---
+$(head -n 1 "$(sdir "$src")/inbox.jsonl" | jq -r '.message // empty')
+--- end ---
+EOF
+)"
+	cmd_start "$src-review" --cwd "$cwd" --task "$task" --model "$model" --budget "$budget" --readonly --base "$base"
+}
+
+cmd_stop() {
+	local name="${1:-}"; need_name "$name"; local S; S="$(sdir "$name")"
+	if alive "$name"; then
+		printf '%s\n' '{"type":"abort"}' >>"$S/inbox.jsonl"; sleep 1
+		kill "$(cat "$S/tail.pid")" 2>/dev/null || true   # closes pi stdin -> orderly shutdown
+		for _ in $(seq 50); do alive "$name" || break; sleep 0.1; done
+		alive "$name" && kill "$(cat "$S/pi.pid")" 2>/dev/null || true
+	fi
+	echo "stopped $name (spent \$$(spend_of "$name"); logs kept in $S)"
+}
+
+cmd_clean() { # after the coordinator merged: stop, remove worktree, delete branch
+	local name="${1:-}"; need_name "$name"; shift
+	local repo; repo="$(meta "$name" repo)"
+	[[ -n "$repo" ]] || die "$name was not started with --repo; use git/worktree.sh clean by hand"
+	alive "$name" && cmd_stop "$name" >/dev/null
+	"$WT" clean "$repo" "$name" --base "$(meta "$name" base)" --branch "$(meta "$name" branch)" "$@"
+}
+
+cmd_list() {
+	[[ -d "$HOME_DIR" ]] || exit 0
+	for d in "$HOME_DIR"/*/; do
+		[[ -f "$d/meta" ]] || continue; local n; n="$(basename "$d")"
+		printf '%-24s %-8s $%-8s %s\n' "$n" "$(alive "$n" && echo running || echo exited)" "$(spend_of "$n")" "$(meta "$n" cwd)"
+	done
+}
+
+sub="${1:-}"; shift || true
+case "$sub" in
+	start) cmd_start "$@" ;;
+	watch) cmd_watch "$@" ;;
+	grant) need_name "${1:-}"; send "$1" "$(jq -nc --arg id "${2:?quota id}" '{type:"extension_ui_response",id:$id,value:"granted"}')"; echo granted ;;
+	deny) need_name "${1:-}"; send "$1" "$(jq -nc --arg id "${2:?quota id}" '{type:"extension_ui_response",id:$id,value:"denied"}')"
+		if [[ -n "${3:-}" ]]; then send "$1" "$(jq -nc --arg id "$(newid)" --arg m "Heavy-work slot denied: $3" '{id:$id,type:"steer",message:$m}')"; fi
+		echo denied ;;
+	answer) need_name "${1:-}"; send "$1" "$(jq -nc --arg id "${2:?ask id}" --arg v "${3:?answer}" '{type:"extension_ui_response",id:$id,value:$v}')"; echo sent ;;
+	steer) need_name "${1:-}"; send "$1" "$(jq -nc --arg id "$(newid)" --arg m "${2:?message}" '{id:$id,type:"steer",message:$m}')"; echo queued ;;
+	follow) need_name "${1:-}"; send "$1" "$(prompt_json "${2:?message}")"; echo queued ;;
+	budget) need_name "${1:-}"; [[ "${2:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "usage: budget <name> <usd>"
+		send "$1" "$(prompt_json "/budget $2")"; M="$(sdir "$1")/meta"; awk -v b="$2" '/^budget=/{$0="budget=" b} 1' "$M" >"$M.tmp" && mv "$M.tmp" "$M"; echo "budget set to \$$2" ;;
+	review) cmd_review "$@" ;;
+	clean) cmd_clean "$@" ;;
+	abort) need_name "${1:-}"; send "$1" '{"type":"abort"}'; echo sent ;;
+	status) cmd_status "$@" ;;
+	stop) cmd_stop "$@" ;;
+	list) cmd_list ;;
+	-h|--help|"") sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//' ;;
+	*) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac
