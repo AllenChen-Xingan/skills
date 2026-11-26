@@ -9,6 +9,7 @@ A brief must answer four things: **who you are · what the job is · what to rea
 - **Intent**: paste the human's exact words into the quote block -- don't expand, rewrite or fix typos. Write your own reading of them in a separate paragraph starting "I.e.: ...", so the worker can tell which sentences are the human's and which are yours.
 - **Your job**: numbered steps; for each step say "what done looks like". For a step with external dependencies (something from a human, the slot), say how to ask for it.
 - **Files you may write**: an allowlist. Several workers writing the same file is the number one source of parallel conflicts.
+- **Code goes to pi**: if the workstream needs code, give the absolute path of `scripts/pi-worker` and the worker's total pi budget cap (section 6 of `pi-worker.md`); otherwise write "no code in this workstream". The role rules live in section 1 of `pi-worker.md`; don't restate them.
 - **Hard rules**: the ones specific to this workstream (e.g. "this value never goes into any message"). Shared hard rules live in the common rules; don't repeat them.
 - **Deliverables**: file paths + a one-line acceptance criterion; the last item is always the handoff page.
 
@@ -43,6 +44,13 @@ I.e.: <your one- or two-sentence reading of the words; if ambiguous, write "Ambi
 - <path 1>
 - {{HANDOFF_DIR}}/{{WORKER}}.md (handoff page)
 
+## Code goes to pi
+You do not write code yourself (including tests). Hand every code change to pi, following section 8 of the worker protocol (`<path>/references/worker-protocol.md`); pi's role rules are in section 1 of `<path>/references/pi-worker.md`.
+- pi-worker: `<absolute path>/scripts/pi-worker`
+- Your total pi budget cap: $<x> (ask the coordinator before going over it)
+- pi commits on its own branch `w/{{WORKER}}-pi<n>`; you merge it into `w/{{WORKER}}` after review. Issues, pushing and PRs are yours only
+- Report pi spend in every stage report and in "ready to wrap up", plus each pi commit range
+
 ## Hard rules (specific to this workstream)
 - <e.g. a certain value never goes into messages, the handoff page, logs or command-line echo; report only "written, N characters">
 - After 2-3 failures, stop and report to the coordinator; don't keep forcing it
@@ -51,5 +59,5 @@ I.e.: <your one- or two-sentence reading of the words; if ambiguous, write "Ambi
 - <file path> -- <one-line acceptance criterion>
 - {{HANDOFF_DIR}}/{{WORKER}}.md -- says "wrapped up", which files changed, items that need a human decision (if any)
 - Branch `w/{{WORKER}}` rebased onto the latest base branch and pushed; if the project uses PRs, include the draft PR link
-- When everything is done, report "{{WORKER}} ready to wrap up, branch w/{{WORKER}}, PR <link|none>" to the coordinator, with the deliverable paths
+- When everything is done, report "{{WORKER}} ready to wrap up, branch w/{{WORKER}}, PR <link|none>, pi spend $<x>, pi commits <range|none>" to the coordinator, with the deliverable paths
 <!-- template:end -->

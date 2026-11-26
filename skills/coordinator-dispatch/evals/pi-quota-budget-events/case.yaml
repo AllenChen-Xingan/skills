@@ -1,8 +1,0 @@
-schema_version: "1.1"
-name: pi-quota-budget-events
-expected_outcome: |
-  While the heavy-work slot is held by Claude Code worker 1b, does not grant it to pi worker px; instead queues px on the board and says it will grant once 1b returns the slot;
-  for pr2, which went over budget, first looks at status to judge whether it is worth continuing, then decides between raising the budget and following up, or stopping and reassigning;
-  records cost on the board; never actually runs pi-worker (only writes out the commands).
-context:
-  scaffold_script: place-files.sh

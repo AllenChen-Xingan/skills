@@ -1,6 +1,6 @@
 # Template for the "Git" section of a project's AGENTS.md
 
-Put it in `AGENTS.md` at the project root (create one if there is none), then add a line `@AGENTS.md` to `CLAUDE.md`. pi reads `AGENTS.md` automatically and Claude Code reads it through the import in `CLAUDE.md`, so both kinds of worker see the same rules.
+Put it in `AGENTS.md` at the project root (create one if there is none), then add a line `@AGENTS.md` to `CLAUDE.md`. pi reads `AGENTS.md` automatically and Claude Code reads it through the import in `CLAUDE.md`, so Claude Code workers and the pi they start see the same rules.
 Replace each `<…>` with this project's actual value. The reasoning and details of the flow are in `git-workflow.md`; this only holds the part workers need to follow.
 
 <!-- template:start -->
@@ -26,9 +26,11 @@ In this project a coordinating session (the coordinator) dispatches workers to w
 
 <why it changed and how it was verified>
 
-Worker: <your name> (<claude|pi>, <model>)
+Worker: <your name> (claude, <model>)     <- pi writes the trailers "Agent: pi" and "Model: <model>" instead
 ```
 type: feat / fix / refactor / test / docs / chore. Do not commit secrets, `.env*`, generated files, or `<other-paths-kept-out-of-the-repo>`.
+
+**If you are pi** (started by a Claude Code worker through `pi-worker`): you only write code and run the tests your brief names. You work on your own branch `w/<worker>-pi<n>`; commit each small logical step there (commits are rollback points) with `--trailer "Agent: pi" --trailer "Model: <model>"`. Do not push, open issues or PRs, merge or switch branches; the worker that started you reviews your commits and does that. The push / PR / sync steps above are not yours. Your brief wins over this section.
 
 **Conflicts**: resolve them only in files you changed; if a conflict involves someone else's files, run `git rebase --abort` and report to the coordinator.
 

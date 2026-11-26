@@ -1,5 +1,5 @@
 // Claude Code PreToolUse hook (matcher: Bash) that applies the worker git policy to Claude Code workers.
-// Same rules as pi workers (git-policy.ts). Installed by spawn-worker.sh through `claude --settings`,
+// Same rules as the pi extension (git-policy.ts). Installed by spawn-worker.sh through `claude --settings`,
 // so it only exists in worker sessions, never in the coordinator's.
 //
 // The worker's own branch comes from CD_WORKER_BRANCH (set by spawn-worker.sh at launch), not from the

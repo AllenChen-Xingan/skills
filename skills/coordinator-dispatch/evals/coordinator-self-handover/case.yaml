@@ -1,0 +1,11 @@
+schema_version: "1.1"
+name: coordinator-self-handover
+expected_outcome: |
+  Writes state/handoff/coordinator.md covering what it is doing, each workstream with its window and session id, pending human decisions,
+  slot / pi caps and spend, the benchmark still running in the background and the lock it holds (wait for it or hand it over explicitly),
+  and where the red lines and secrets rules live, without copying any secret value. Writes a first message for the new coordinator
+  (load coordinator-dispatch, read the handoff page and board, report to the human). The plan opens the new coordinator with
+  spawn-worker.sh in the same tmux session; the new coordinator, not the old one, closes coord-1 with close-worker.sh after reporting in;
+  workers are told the new coordinator window; the human is told which window to talk in; the session table is updated.
+context:
+  scaffold_script: place-files.sh

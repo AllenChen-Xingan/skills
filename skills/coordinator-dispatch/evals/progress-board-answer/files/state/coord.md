@@ -1,5 +1,5 @@
 # Coordinator board
-> Coordinator session name: `main-01`. tmux workspace: `demo-ws`.
+> Coordinator session name: `demo-meta`. tmux workspace: `demo-ws`.
 
 ## Workers
 | Window | Task | Brief | Handoff page | Status |

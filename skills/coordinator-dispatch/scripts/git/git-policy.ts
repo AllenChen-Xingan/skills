@@ -1,13 +1,17 @@
 /**
- * Git policy for pi workers (pure, no pi imports, so it can be unit-tested with plain node).
+ * Git policy for workers and the pi they start (pure, no pi imports, so it can be unit-tested with plain node).
  * Workers commit and push freely, but only their own branch; everything that changes
  * shared history or other people's refs stays with the coordinator. See references/git-workflow.md.
+ * role "pi" is stricter: pi commits in small steps on its own branch (each commit carries an
+ * `Agent: pi` trailer) but never pushes and never touches PRs or issues; those stay with the
+ * Claude Code worker that started it. See references/pi-worker.md section 1.
  */
 
 export interface GitPolicy {
 	branch: string; // the worker's own branch; "" = no branch restriction
 	base: string; // integration branch, e.g. "origin/main"; always protected
 	protected: string; // regex alternation of protected branch names; "" = default
+	role?: "worker" | "pi"; // default "worker"
 }
 
 export const DEFAULT_PROTECTED = "main|master|develop|trunk|release/.*|production";
@@ -19,6 +23,9 @@ export function gitViolation(cmd: string, policy: GitPolicy): string | undefined
 	const isProtected = (b: string) => PROTECTED.test(b) || (policy.base !== "" && b === policy.base.replace(/^origin\//, ""));
 	if (/\bgh\s+pr\s+merge\b/.test(cmd)) return "Merging PRs is the coordinator's job; report done and let it merge.";
 	if (/\bgh\s+(release|repo\s+(delete|edit|rename|archive))\b/.test(cmd)) return "Releases and repo settings are the coordinator's job.";
+	const pi = policy.role === "pi";
+	if (pi && /\bgh\s+(pr|issue)\s+(?!(view|list|status|diff|checks)\b)\S+/.test(cmd))
+		return "pi does not open or change PRs or issues; report done and the Claude Code worker that started you handles them.";
 	for (const part of cmd.split(/&&|\|\||;|\||\n/)) {
 		// drop shell redirections (2>&1, >log, 2>/dev/null, <in) so they are not read as refspecs
 		const clean = part.replace(/\d*>&\d+|\d*>>?\s*\S+|<\s*\S+/g, " ");
@@ -29,6 +36,10 @@ export function gitViolation(cmd: string, policy: GitPolicy): string | undefined
 		const args = rest.trim().split(/\s+/).filter(Boolean);
 		const flags = args.filter((a) => a.startsWith("-"));
 		const words = args.filter((a) => !a.startsWith("-"));
+		if (sub === "push" && pi)
+			return "pi never pushes; commit on your own branch and report done. The Claude Code worker that started you merges your branch and pushes.";
+		if (sub === "commit" && pi && !/Agent:\s*pi\b/.test(cmd) && !flags.includes("--no-edit"))
+			return 'Every pi commit carries trailers: git commit -m "<type>(<scope>): <what>" --trailer "Agent: pi" --trailer "Model: <your model>".';
 		if (sub === "push") {
 			if (flags.some((f) => f === "-f" || f === "--force") || words.some((w) => w.startsWith("+")))
 				return "Plain force push is not allowed; after a rebase of your own branch use --force-with-lease.";

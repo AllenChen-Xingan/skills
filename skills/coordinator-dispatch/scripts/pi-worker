@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
-# pi-worker — run pi (RPC mode) as a worker of a Claude Code coordinator. See references/pi-worker.md.
+# pi-worker — run by a Claude Code worker (never the coordinator) to start pi (RPC mode) as its coding hand:
+# pi writes code and commits small steps on its own branch; the worker reviews, merges pi's branch into
+# its own, pushes, opens issues/PRs and reports. See references/pi-worker.md section 1.
 #
 #   pi-worker start  <name> (--repo REPO [--base B] [--branch BR] | --cwd DIR) (--task TEXT | --task-file FILE)
-#                    [--model M] [--thinking L] [--budget USD] [--heavy-re REGEX] [--readonly] [--session PATH]
+#                    [--model M] [--thinking L] [--budget USD] [--heavy-extra-re RE] [--heavy-re RE] [--readonly] [--session PATH]
+#                    --heavy-extra-re: add project commands to the default heavy-work set (scripts/pi/heavy.ts);
+#                    --heavy-re: replace that set (rare)
 #                    --repo: creates worktree <repo>.worktrees/<name> on new branch w/<name> from the base
-#                    (default origin/<default branch>, else the repo's current branch). See references/git-workflow.md
+#                    (normal use: --repo <main repo> --base <the worker's branch>; default base origin/<default
+#                    branch>, else the repo's current branch). See references/git-workflow.md
+#                    --cwd: run in an existing worktree (fallback only: a Claude session's auto-commit hook
+#                    there would commit pi's half-written code)
 #   pi-worker watch  <name> [--verbose] [--from-start]   # run under Monitor: one line per key event
 #   pi-worker grant  <name> <quota-id>                   # give the heavy-work slot ("granted")
 #   pi-worker deny   <name> <quota-id> ["why"]           # refuse it (the why goes in as a steer)
@@ -12,8 +19,8 @@
 #   pi-worker steer  <name> "msg"                        # inject after current tool calls, before next LLM call
 #   pi-worker follow <name> "msg"                        # queue for when pi finishes / new round if idle
 #   pi-worker budget <name> <usd>                        # change the cost cap (0 = none); unblocks after BUDGET
-#   pi-worker review <name> [--model M] [--budget USD]   # start <name>-review: read-only cheap review of the diff
-#   pi-worker clean  <name> [--delete-remote] [--force]  # after merge: stop, remove worktree + branch
+#   pi-worker review <name> [--model M] [--budget USD]   # read-only pi review of the diff (not in the default flow: pi only writes code)
+#   pi-worker clean  <name> [--delete-remote] [--force]  # after its branch is merged into the base: stop, remove worktree + branch
 #   pi-worker abort  <name> | status <name> | stop <name> | list
 #
 # State: $PI_WORKER_HOME/<name>/ (default ~/.local/state/pi-worker)
@@ -46,7 +53,7 @@ is_protected() { [[ "$1" =~ ^($PROTECTED_RE)$ ]]; }
 
 cmd_start() {
 	local name="${1:-}"; need_name "$name"; shift
-	local cwd="" repo="" base="" branch="" task="" model="$DEFAULT_MODEL" thinking="" session="" budget="${PI_WORKER_BUDGET_USD:-0}" heavy="${PI_WORKER_HEAVY_RE:-}" readonly=false
+	local cwd="" repo="" base="" branch="" task="" model="$DEFAULT_MODEL" thinking="" session="" budget="${PI_WORKER_BUDGET_USD:-0}" heavy="${PI_WORKER_HEAVY_RE:-}" heavy_extra="${PI_WORKER_HEAVY_EXTRA_RE:-}" readonly=false
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
 			--cwd) cwd="$2"; shift 2 ;;
@@ -60,6 +67,7 @@ cmd_start() {
 			--session) session="$2"; shift 2 ;;
 			--budget) budget="$2"; shift 2 ;;
 			--heavy-re) heavy="$2"; shift 2 ;;
+			--heavy-extra-re) heavy_extra="$2"; shift 2 ;;
 			--readonly) readonly=true; shift ;;
 			*) die "unknown option $1" ;;
 		esac
@@ -74,7 +82,7 @@ cmd_start() {
 	[[ -d "$cwd" ]] || die "--repo or --cwd (an existing directory) required"
 	if [[ -z "$repo" ]] && git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1 && ! $readonly; then
 		branch="$(git -C "$cwd" rev-parse --abbrev-ref HEAD)"
-		is_protected "$branch" && die "$cwd is on protected branch $branch; use --repo to give the worker its own branch"
+		is_protected "$branch" && die "$cwd is on protected branch $branch; run pi in a worker worktree on its own branch (w/<name>)"
 		[[ -n "$base" ]] || base="$("$WT" base "$cwd")"
 	fi
 	[[ "$budget" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "--budget must be a number of USD"
@@ -91,7 +99,7 @@ cmd_start() {
 	printf '%s\n' "cwd=$cwd" "repo=$repo" "branch=$branch" "base=$base" "model=$model" "budget=$budget" "readonly=$readonly" "started=$(date -u +%FT%TZ)" >"$S/meta"
 
 	# Runner: inbox.jsonl --tail--> fifo --> pi stdin; pi stdout --> events.jsonl.
-	PI_WORKER_BUDGET_USD="$budget" PI_WORKER_HEAVY_RE="$heavy" PI_WORKER_BRANCH="$branch" PI_WORKER_BASE="$base" \
+	PI_WORKER_BUDGET_USD="$budget" PI_WORKER_HEAVY_RE="$heavy" PI_WORKER_HEAVY_EXTRA_RE="$heavy_extra" PI_WORKER_BRANCH="$branch" PI_WORKER_BASE="$base" PI_WORKER_COMMIT_MODEL="$model" \
 	PI_WORKER_PROTECTED="$PROTECTED_RE" nohup bash -c '
 		S="$1"; shift; cd "$1"; shift
 		tail -n +1 -F "$S/inbox.jsonl" >"$S/stdin.fifo" 2>/dev/null & echo $! >"$S/tail.pid"
@@ -109,7 +117,7 @@ cmd_start() {
 	echo "started $name (pid $(cat "$S/pi.pid")) model=$model budget=\$$budget readonly=$readonly cwd=$cwd${branch:+ branch=$branch base=$base} state=$S"
 }
 
-# jq filter: raw RPC records -> one line per key event the coordinator acts on.
+# jq filter: raw RPC records -> one line per key event the Claude Code worker acts on.
 FILTER='
 def clip(n): tostring | gsub("\n";" ⏎ ") | if length > n then .[0:n] + "…" else . end;
 def ts: (now | strftime("%H:%M:%S"));
@@ -236,7 +244,7 @@ cmd_stop() {
 	echo "stopped $name (spent \$$(spend_of "$name"); logs kept in $S)"
 }
 
-cmd_clean() { # after the coordinator merged: stop, remove worktree, delete branch
+cmd_clean() { # --repo workers only, after the merge: stop, remove worktree, delete branch
 	local name="${1:-}"; need_name "$name"; shift
 	local repo; repo="$(meta "$name" repo)"
 	[[ -n "$repo" ]] || die "$name was not started with --repo; use git/worktree.sh clean by hand"
@@ -271,6 +279,6 @@ case "$sub" in
 	status) cmd_status "$@" ;;
 	stop) cmd_stop "$@" ;;
 	list) cmd_list ;;
-	-h|--help|"") sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//' ;;
-	*) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+	-h|--help|"") sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//' ;;
+	*) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
