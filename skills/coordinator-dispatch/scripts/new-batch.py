@@ -55,10 +55,10 @@ def write_new(path, content, dry):
 def main():
     p = argparse.ArgumentParser(
         description="Generate a batch skeleton of worker briefs from the templates (common.md + one brief and one first message per worker). Existing files are never overwritten.",
-        epilog='Example: new-batch.py "/path/with space/proj/_tmp/20990101-b1" --boss main-01 --workers api,tree '
+        epilog='Example: new-batch.py "/path/with space/proj/_tmp/20990101-b1" --boss proj-meta --workers api,tree '
                '--handoff-dir state/handoff')
     p.add_argument("batch_dir", help="batch directory (created if it does not exist)")
-    p.add_argument("--boss", required=True, help="coordinator session name")
+    p.add_argument("--boss", required=True, help="coordinator session name: always <project>-meta (scripts/coordinator-name.sh <coordinator workdir>)")
     p.add_argument("--workers", required=True, help="comma-separated worker window names, e.g. api,tree,infra")
     p.add_argument("--handoff-dir", default="state/handoff", help="handoff page directory, the path written into the briefs (default state/handoff)")
     p.add_argument("--board", help="board path; if given and the file does not exist, create it from the template")

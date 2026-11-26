@@ -4,9 +4,11 @@
 #   2 quota   heavy command waits for grant, QUOTA_RETURN after it
 #   3 budget  80% warning, cap aborts the run, `budget` raises it and work resumes
 #   4 review  `review` starts a read-only reviewer on everything since the base and its report arrives
-#   5 git     --repo makes worktree + own branch; worker commits and pushes its branch; push to main,
-#             force push are blocked; leaving the branch is flagged; coordinator merges; clean removes all
-#   (the git policy itself is table-tested in scripts/git/git-policy.test.ts)
+#   5 git     the Claude Code worker starts pi with --repo <main repo> --base <its branch>: pi gets its own
+#             worktree + branch, commits small steps with Agent/Model trailers (untrailed commit blocked);
+#             any push and gh pr create are blocked; leaving the branch is flagged; the worker
+#             fast-forwards pi's branch into its own; clean removes pi's worktree + branch
+#   (the git policy and the heavy-work rule are table-tested in scripts/git/git-policy.test.ts and scripts/pi/heavy.test.ts)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; BIN="$HERE/../../pi-worker"
 T="$(mktemp -d)"; PORT=$(( 18000 + RANDOM % 1000 ))
@@ -108,31 +110,37 @@ echo "ok 4 review"
 CUR=t5; R="$T/r5"; git init -q --bare "$T/remote5.git"
 git init -q -b main "$R" && echo a >"$R/a.txt" && git -C "$R" add a.txt && git -C "$R" -c user.email=t@t -c user.name=t commit -qm init
 git -C "$R" remote add origin "$T/remote5.git" && git -C "$R" push -q -u origin main && git -C "$R" remote set-head origin main
-"$BIN" start t5 --repo "$R" --task "SCENARIO:git" >"$T/t5.start"
-grep -q "branch=w/t5 base=origin/main" "$T/t5.start" || fail "start did not set branch/base: $(cat "$T/t5.start")"
-[[ "$(git -C "$R.worktrees/t5" rev-parse --abbrev-ref HEAD)" == "w/t5" ]] || fail "worktree not on w/t5"
+WK="$R.worktrees/wk"; git -C "$R" worktree add -q --no-track -b w/wk "$WK" origin/main   # the Claude Code worker's worktree
+"$BIN" start t5 --repo "$R" --base w/wk --task "SCENARIO:git" >"$T/t5.start"
+grep -q "branch=w/t5 base=w/wk" "$T/t5.start" || fail "start did not set branch/base: $(cat "$T/t5.start")"
+[[ "$(git -C "$R.worktrees/t5" rev-parse --abbrev-ref HEAD)" == "w/t5" ]] || fail "pi worktree not on w/t5"
 "$BIN" watch t5 >"$T/t5.out" & W=$!
 wait_for "$T/t5.out" 'REPORT done' 30
+grep -q "GIT blocked: git -c user.email=w@w -c user.name=w commit -qm 'feat: add f' — " "$T/t5.out" || fail "commit without trailer not blocked"
+grep -q 'REPORT done: .*2=\[COMMITTED\] 3=\[COMMITTED2\]' "$T/t5.out" || fail "pi commits on its own branch did not work"
+grep -q 'GIT blocked: git push -q -u origin HEAD' "$T/t5.out" || fail "pi push of its own branch not blocked"
 grep -q 'GIT blocked: git push origin HEAD:main' "$T/t5.out" || fail "push to main not blocked"
-grep -q 'GIT blocked: git push --force' "$T/t5.out" || fail "force push not blocked"
+grep -q 'GIT blocked: gh pr create' "$T/t5.out" || fail "gh pr create not blocked"
 grep -q 'GIT worker left its branch: now on sneaky' "$T/t5.out" || fail "leaving the branch not flagged"
-grep -q 'REPORT done: 0=\[COMMITTED\] 1=\[PUSHED\]' "$T/t5.out" || fail "commit/push of own branch did not work"
-grep -q '5=\[BACK\]' "$T/t5.out" || fail "switch back failed"
-git -C "$T/remote5.git" rev-parse -q --verify refs/heads/w/t5 >/dev/null || fail "branch not on remote"
+grep -q '8=\[BACK\]' "$T/t5.out" || fail "switch back failed"
+[[ "$(git -C "$R" log -1 --format='%(trailers:key=Agent,valueonly)' w/t5 | tr -d '\n')" == "pi" ]] || fail "Agent trailer missing"
+[[ "$(git -C "$R" log -1 --format='%(trailers:key=Model,valueonly)' w/t5 | tr -d '\n')" == "mock/mock-model" ]] || fail "Model trailer missing"
+git -C "$T/remote5.git" rev-parse -q --verify refs/heads/w/t5 >/dev/null && fail "pi branch reached the remote"
 [[ "$(git -C "$T/remote5.git" rev-list --count main)" == 1 ]] || fail "remote main was changed"
 "$BIN" status t5 >"$T/t5.status" 2>&1 || true
-grep -q '1 ahead, 0 behind' "$T/t5.status" || fail "status missing ahead/behind: $(cat "$T/t5.status")"
-grep -q 'unpushed: 0' "$T/t5.status" || fail "status unpushed wrong: $(cat "$T/t5.status")"
+grep -q '2 ahead, 0 behind' "$T/t5.status" || fail "status missing ahead/behind: $(cat "$T/t5.status")"
 kill $W 2>/dev/null; wait $W 2>/dev/null || true
-"$BIN" clean t5 2>/dev/null && fail "clean must refuse an unmerged branch"
-git -C "$R" fetch -q origin && git -C "$R" merge -q --ff-only origin/w/t5 && git -C "$R" push -q origin main   # coordinator merges
-"$BIN" clean t5 --delete-remote >/dev/null
-[[ -d "$R.worktrees/t5" ]] && fail "worktree not removed"
-git -C "$R" rev-parse -q --verify refs/heads/w/t5 >/dev/null && fail "local branch not deleted"
-git -C "$T/remote5.git" rev-parse -q --verify refs/heads/w/t5 >/dev/null && fail "remote branch not deleted"
+"$BIN" clean t5 2>/dev/null && fail "clean must refuse a branch not yet merged into the worker's branch"
+git -C "$WK" merge -q --ff-only w/t5 || fail "worker could not fast-forward pi's branch"   # worker accepts pi's commits
+[[ "$(git -C "$WK" rev-list --count origin/main..w/wk)" == 2 ]] || fail "worker branch missing pi's commits"
+"$BIN" clean t5 >/dev/null
+[[ -d "$R.worktrees/t5" ]] && fail "pi worktree not removed"
+git -C "$R" rev-parse -q --verify refs/heads/w/t5 >/dev/null && fail "pi branch not deleted"
+[[ -d "$WK" ]] || fail "clean removed the worker's worktree"
 echo "ok 5 git workflow"
 
 sleep 0.5
 pgrep -f "$PI_WORKER_HOME" >/dev/null && fail "processes left behind: $(pgrep -fl "$PI_WORKER_HOME")"
 node "$HERE/../../git/git-policy.test.ts" || fail "git-policy table test"
+node "$HERE/../heavy.test.ts" || fail "heavy-work table test"
 echo "PASS e2e-mock (basic, quota, budget, review, git workflow)"

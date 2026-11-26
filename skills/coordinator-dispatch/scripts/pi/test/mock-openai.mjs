@@ -2,7 +2,8 @@
 // The scenario is chosen by a marker in the first user message:
 //   (default)          report(progress) -> ask_claude -> report(done: answer + steer seen) -> text
 //   SCENARIO:quota     bash "echo HEAVYMARK" -> report(done: tool result) -> text
-//   SCENARIO:git       commit -> push own branch -> push main (blocked) -> force push (blocked)
+//   SCENARIO:git       add -> commit without trailer (blocked) -> commit with trailers -> second commit
+//                      -> push own branch (blocked) -> push main (blocked) -> gh pr create (blocked)
 //                      -> switch away (flagged) -> switch back -> report(done: all results) -> text
 //   SCENARIO:budget    report(progress) forever (the budget cap must stop it)
 //   SCENARIO:review    report(done: findings) -> text
@@ -45,10 +46,13 @@ const scenarios = {
 	},
 	git(n, tools) {
 		const steps = [
-			"echo hi > f.txt && git add f.txt && git -c user.email=w@w -c user.name=w commit -qm 'feat: add f' && echo COMMITTED",
+			"echo hi > f.txt && git add f.txt && echo ADDED",
+			"git -c user.email=w@w -c user.name=w commit -qm 'feat: add f'",
+			"git -c user.email=w@w -c user.name=w commit -qm 'feat: add f' --trailer 'Agent: pi' --trailer 'Model: mock/mock-model' && echo COMMITTED",
+			"echo two > g.txt && git add g.txt && git -c user.email=w@w -c user.name=w commit -qm 'test: add g' --trailer 'Agent: pi' --trailer 'Model: mock/mock-model' && echo COMMITTED2",
 			"git push -q -u origin HEAD 2>&1 && echo PUSHED",
 			"git push origin HEAD:main",
-			"git push --force origin HEAD",
+			"gh pr create --draft --title x --body y",
 			"git switch -q -c sneaky",
 			"git switch -q - && echo BACK",
 		];

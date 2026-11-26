@@ -1,0 +1,9 @@
+schema_version: "1.1"
+name: worker-pi-slot-budget-requests
+expected_outcome: |
+  Treats both messages as requests from Claude Code workers, not as pi events: the coordinator never runs pi-worker and never addresses the pi processes.
+  While the heavy-work slot is held by worker 1b, does not give it to worker px; queues px (for its pi) on the board and says px gets "slot is yours" once 1b returns it, after which px grants its own pi.
+  For pr2's request to raise its pi cap, weighs the reported remaining work before deciding: raise the cap (and tell pr2 to continue its pi), or tell pr2 to split the task smaller; gives reasons.
+  Records pi spend on the board; only writes out the messages it would send to the workers.
+context:
+  scaffold_script: place-files.sh

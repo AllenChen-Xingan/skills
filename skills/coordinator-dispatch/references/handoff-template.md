@@ -23,6 +23,11 @@ Writing tips:
 | File | What changed |
 |---|---|
 
+## pi runs (if any)
+| pi | Commits merged into my branch | Spend / cap |
+|---|---|---|
+| {{WORKER}}-pi1 | `<first>..<last>` (n commits) | $<spent>/$<cap> |
+
 ## Findings
 - <surprises, pitfalls, things that affect other workstreams>
 

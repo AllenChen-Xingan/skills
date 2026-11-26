@@ -14,6 +14,7 @@ The first message is always read from a file, never spliced into the command lin
 
 Options:
   --cmd CMD            start command (default $CD_CLAUDE_CMD or "claude"), e.g. "claude --model opus"
+  --name NAME          session name others message it by (appends --name NAME to the command); a coordinator always gets $(coordinator-name.sh <dir>)
   --ready-pattern RE   regex that means "ready" (grep -E; default matches the Claude Code input prompt)
   --block-pattern RE   if this appears, treat the worker as stuck on a confirmation dialog and do not handle it automatically (default matches trust-folder / permission prompts)
   --timeout SEC        seconds to wait for ready (default 60)
@@ -32,12 +33,13 @@ USAGE
 CMD="${CD_CLAUDE_CMD:-claude}"
 READY_RE='(\? for shortcuts|^[[:space:]]*[>❯$][[:space:]]*$|Try "|bypass permissions|accept edits|auto mode on)'
 BLOCK_RE='(Do you trust|trust the files|trust this folder|one you trust|Enter y/n|Yes, proceed|Do you want to proceed|1\. Yes)'
-TIMEOUT=60; TAIL=20; SETTLE=1; DRY=0; GUARD=1; BASE=""
+TIMEOUT=60; TAIL=20; SETTLE=1; DRY=0; GUARD=1; BASE=""; NAME=""
 POS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --cmd) CMD="$2"; shift 2 ;;
+    --name) NAME="$2"; shift 2 ;;
     --ready-pattern) READY_RE="$2"; shift 2 ;;
     --block-pattern) BLOCK_RE="$2"; shift 2 ;;
     --timeout) TIMEOUT="$2"; shift 2 ;;
@@ -58,8 +60,12 @@ command -v tmux >/dev/null || { echo "tmux not found" >&2; exit 1; }
 [[ -d "$WORKDIR" ]] || { echo "Working directory does not exist: $WORKDIR" >&2; exit 1; }
 [[ -f "$MSG" && -s "$MSG" ]] || { echo "First-message file is missing or empty: $MSG" >&2; exit 1; }
 [[ "$WINDOW" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "Window name may only contain letters, digits, _ . -: $WINDOW" >&2; exit 1; }
+if [[ -n "$NAME" ]]; then
+  [[ "$NAME" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "Session name may only contain letters, digits, _ . -: $NAME" >&2; exit 1; }
+  CMD="$CMD --name $NAME"
+fi
 
-# Git guard: a worker on its own branch gets the PreToolUse hook (same policy as pi workers).
+# Git guard: a worker on its own branch gets the PreToolUse hook (same policy as the pi extension).
 # The branch is pinned through the environment so switching to main does not lift the rules.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROTECTED_RE="${PI_WORKER_PROTECTED:-main|master|develop|trunk|release/.*|production}"

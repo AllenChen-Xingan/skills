@@ -1,0 +1,11 @@
+schema_version: "1.1"
+name: rotate-workers-over-threshold
+expected_outcome: |
+  Measures context with scripts/context-size.py (passing the fake projects dir), then applies the thresholds:
+  api (about 612k) gets a rotation request; ui (about 290k, just finished a stage) is rotated too; docs (about 180k, mid-feature) is left alone;
+  lint (accepted and merged) is closed without a replacement. The rotation request asks the worker to stop its pi and confirm with kill -0,
+  return slots/locks, leave the handoff page resumable and reply "ready to close". The plan closes each window with close-worker.sh --yes only
+  after "ready to close" and the pane tail, then opens a replacement with spawn-worker.sh and a resume message pointing to brief, common rules
+  and handoff page, and updates the session table. Nothing is run against tmux.
+context:
+  scaffold_script: place-files.sh

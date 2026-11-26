@@ -1,0 +1,6 @@
+{"type": "user", "cwd": "/work/demo.worktrees/docs", "message": {"role": "user", "content": "go on"}}
+{"type": "assistant", "isSidechain": false, "cwd": "/work/demo.worktrees/docs", "message": {"role": "assistant", "usage": {"input_tokens": 3, "cache_read_input_tokens": 52997, "cache_creation_input_tokens": 1000, "output_tokens": 400}}}
+{"type": "user", "cwd": "/work/demo.worktrees/docs", "message": {"role": "user", "content": "go on"}}
+{"type": "assistant", "isSidechain": false, "cwd": "/work/demo.worktrees/docs", "message": {"role": "assistant", "usage": {"input_tokens": 3, "cache_read_input_tokens": 124996, "cache_creation_input_tokens": 1000, "output_tokens": 400}}}
+{"type": "user", "cwd": "/work/demo.worktrees/docs", "message": {"role": "user", "content": "go on"}}
+{"type": "assistant", "isSidechain": false, "cwd": "/work/demo.worktrees/docs", "message": {"role": "assistant", "usage": {"input_tokens": 3, "cache_read_input_tokens": 178997, "cache_creation_input_tokens": 1000, "output_tokens": 400}}}

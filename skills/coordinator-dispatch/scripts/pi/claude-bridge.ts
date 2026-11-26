@@ -1,38 +1,40 @@
 /**
- * claude-bridge — makes a pi worker behave as a worker of a Claude Code coordinator.
+ * claude-bridge — makes pi behave as the coding hand of the Claude Code worker that started it
+ * (pi writes code and commits small steps on its own branch; the worker reviews, merges pi's
+ * branch into its own, pushes, opens issues/PRs and talks to the coordinator).
  *
- * Talks to the coordinator through pi's RPC stream (read by `pi-worker watch`):
+ * Talks to that worker through pi's RPC stream (read by `pi-worker watch`):
  *   report_to_claude  tool   non-blocking report (progress / done / blocked / failed)
  *   ask_claude        tool   blocking question; answered with `pi-worker answer`
  *
  * Enforces the worker protocol mechanically instead of trusting the model:
- *   slot   heavy bash commands (PI_WORKER_HEAVY_RE) wait for `pi-worker grant|deny`;
+ *   slot   heavy bash commands (heavy.ts; PI_WORKER_HEAVY_EXTRA_RE adds, PI_WORKER_HEAVY_RE replaces)
+ *          wait for `pi-worker grant|deny`;
  *          the slot is returned automatically when the command ends
- *   git    commits and pushes are the worker's own job, but only on its own branch
- *          (PI_WORKER_BRANCH): pushing other or protected branches, force push
- *          (--force-with-lease is fine), deleting branches/tags, merging PRs,
- *          editing git config or worktrees are blocked; leaving the branch is flagged
+ *   git    pi stays on its own branch (PI_WORKER_BRANCH) and commits there in small steps; every
+ *          commit must carry an `Agent: pi` trailer (Model: comes from PI_WORKER_COMMIT_MODEL).
+ *          Any push, gh pr/issue writes, deleting branches/tags, merging PRs, editing git config
+ *          or worktrees are blocked (git-policy.ts, role "pi"); leaving the branch is flagged
  *   budget cumulative model cost is tracked; at PI_WORKER_BUDGET_USD the run is aborted
  *          and further tool calls are blocked until `/budget <usd>` raises the cap
  *
- * Outside RPC mode (no coordinator) ask_claude and the quota gate degrade
+ * Outside RPC mode (no Claude worker attached) ask_claude and the quota gate degrade
  * to "decide yourself" / "run", so nothing ever hangs.
  */
 
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { gitViolation } from "../git/git-policy.ts";
+import { heavyRe } from "./heavy.ts";
 
 const env = process.env;
 const ASK_TIMEOUT_MS = Number(env.PI_WORKER_ASK_TIMEOUT_MS ?? 20 * 60 * 1000);
 const QUOTA_TIMEOUT_MS = Number(env.PI_WORKER_QUOTA_TIMEOUT_MS ?? 60 * 60 * 1000);
-const DEFAULT_HEAVY =
-	"\\b(make|ninja|cmake\\s+--build|cargo\\s+(build|test|bench)|zig\\s+build|xcodebuild|swift\\s+(build|test)|" +
-	"(npm|pnpm|yarn|bun)\\s+(run\\s+)?(build|test)|pytest|tox|go\\s+(build|test)|gradlew?|mvn|bazel|docker\\s+build)\\b";
-const HEAVY_RE = new RegExp(env.PI_WORKER_HEAVY_RE || DEFAULT_HEAVY, "i");
+const HEAVY_RE = heavyRe(env); // default + PI_WORKER_HEAVY_EXTRA_RE, or PI_WORKER_HEAVY_RE (heavy.ts)
 const BRANCH = env.PI_WORKER_BRANCH || ""; // the worker's own branch ("" = not a git worker)
 const BASE = env.PI_WORKER_BASE || "";
-const POLICY = { branch: BRANCH, base: BASE, protected: env.PI_WORKER_PROTECTED || "" };
+const POLICY = { branch: BRANCH, base: BASE, protected: env.PI_WORKER_PROTECTED || "", role: "pi" as const };
+const MODEL = env.PI_WORKER_COMMIT_MODEL || "<your model>";
 
 const GRANT = "granted";
 const DENY = "denied";
@@ -53,15 +55,17 @@ const reportTool = defineTool({
 	name: "report_to_claude",
 	label: "Report to Claude",
 	description:
-		"Send a short status report to your coordinator (Claude, the coordinator). Does not wait for a reply. " +
+		"Send a short status report to the Claude Code worker that started you. Does not wait for a reply. " +
 		"Use at milestones, when tests pass/fail, when blocked, and once when the task is done.",
-	promptSnippet: "Report milestones, blockers and completion to the coordinator",
+	promptSnippet: "Report milestones, blockers and completion to the Claude worker that started you",
 	promptGuidelines: [
 		"Call report_to_claude with status=done exactly once when the whole task is finished: list changed files and how you verified them (commands + results).",
 		"Call report_to_claude with status=blocked when you cannot proceed, then ask_claude if you need a decision.",
 		"Do not report trivial steps; one report per real milestone.",
-		"Git: work only on your own branch. Commit small, verified steps (follow the commit rules in AGENTS.md); push your branch at milestones and before reporting done; never push to main or other branches, never plain --force (use --force-with-lease after rebasing your own branch), never merge PRs.",
-		"Heavy commands (full builds, full test suites) block until the coordinator grants the machine-wide slot; prefer targeted tests and batch heavy runs.",
+		"You only write code (and its tests). Git: stay on the current branch and commit each small logical step there (commits are rollback points): " +
+			`git add <files> && git commit -m "<type>(<scope>): <what>" --trailer "Agent: pi" --trailer "Model: ${MODEL}". ` +
+			"Never push, open issues or PRs, or merge; the Claude worker reviews your commits and does that.",
+		"Heavy commands (full builds, full test suites) block until the Claude worker grants the machine-wide slot; prefer the targeted tests your brief names.",
 	],
 	parameters: Type.Object({
 		status: Type.Union(
@@ -82,27 +86,27 @@ const askTool = defineTool({
 	name: "ask_claude",
 	label: "Ask Claude",
 	description:
-		"Ask your coordinator (Claude) about requirements, architecture or acceptance criteria and wait for the answer. " +
+		"Ask the Claude Code worker that started you about requirements, architecture or acceptance criteria and wait for the answer. " +
 		"Only for decisions you should not make alone; never for things you can find in the code.",
-	promptSnippet: "Ask the coordinator for a decision and wait for the answer",
+	promptSnippet: "Ask the Claude worker for a decision and wait for the answer",
 	parameters: Type.Object({
 		question: Type.String({ description: "The question, the options you see, and your recommendation." }),
 	}),
 	async execute(_id, params, signal, _onUpdate, ctx) {
 		if (!ctx.hasUI || ctx.mode !== "rpc") {
 			return {
-				content: [{ type: "text", text: "No coordinator connected. Choose the conservative option and mention it in your final report." }],
+				content: [{ type: "text", text: "No Claude worker connected. Choose the conservative option and mention it in your final report." }],
 				details: { answered: false },
 			};
 		}
 		const answer = await ctx.ui.input(`[ask_claude] ${params.question}`, "answer", { timeout: ASK_TIMEOUT_MS, signal });
 		if (answer === undefined || answer.trim() === "") {
 			return {
-				content: [{ type: "text", text: "Coordinator did not answer in time. Choose the conservative option and mention it in your report." }],
+				content: [{ type: "text", text: "The Claude worker did not answer in time. Choose the conservative option and mention it in your report." }],
 				details: { answered: false },
 			};
 		}
-		return { content: [{ type: "text", text: `Coordinator answer: ${answer}` }], details: { answered: true } };
+		return { content: [{ type: "text", text: `Answer from the Claude worker: ${answer}` }], details: { answered: true } };
 	},
 });
 
@@ -160,7 +164,7 @@ export default function (pi: ExtensionAPI) {
 		if (!HEAVY_RE.test(cmd) || !ctx.hasUI || ctx.mode !== "rpc") return undefined;
 		const v = await ctx.ui.select(`[quota] ${cmd}`, [GRANT, DENY], { timeout: QUOTA_TIMEOUT_MS });
 		if (v !== GRANT) {
-			return { block: true, reason: "The coordinator did not grant the heavy-work slot. Do parts that do not need it, report progress, or ask_claude." };
+			return { block: true, reason: "The Claude worker did not grant the heavy-work slot. Do parts that do not need it, report progress, or ask_claude." };
 		}
 		holding.add(event.toolCallId);
 		return undefined;
